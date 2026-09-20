@@ -1,6 +1,7 @@
 const TELEGRAM_API = "https://api.telegram.org/bot";
 
 const START_POINTS = 1000;
+
 const FARM_BASE = 1;
 const FACTORY_BASE = 2;
 
@@ -35,11 +36,20 @@ export default {
 
       const update = await request.json();
 
-      await handleUpdate(update, env);
+      // Dice must be checked BEFORE normal message handling.
+      if (update.message?.dice) {
+        await handleDice(update.message, env);
+        return new Response("OK");
+      }
+
+      if (update.message) {
+        await handleMessage(update.message, env);
+        return new Response("OK");
+      }
 
       return new Response("OK");
     } catch (error) {
-      console.error(error);
+      console.error("WORKER ERROR:", error);
       return new Response("OK");
     }
   }
@@ -47,14 +57,14 @@ export default {
 
 
 // ======================================================
-// Telegram
+// TELEGRAM
 // ======================================================
 
 async function telegram(env, method, body) {
   const token = env.TELEGRAM_BOT_TOKEN;
 
   if (!token) {
-    throw new Error("TELEGRAM_BOT_TOKEN is not configured");
+    throw new Error("TELEGRAM_BOT_TOKEN is missing");
   }
 
   const response = await fetch(
@@ -68,7 +78,13 @@ async function telegram(env, method, body) {
     }
   );
 
-  return await response.json();
+  const result = await response.json();
+
+  if (!result.ok) {
+    console.error("TELEGRAM ERROR:", result);
+  }
+
+  return result;
 }
 
 
@@ -83,16 +99,16 @@ async function sendMessage(env, chatId, text, extra = {}) {
 
 
 // ======================================================
-// Storage
+// STORAGE
 // ======================================================
 
 async function getPlayer(env, userId) {
   const key = `player:${userId}`;
 
-  const data = await env.CHIA_DB.get(key, "json");
+  const existing = await env.CHIA_DB.get(key, "json");
 
-  if (data) {
-    return data;
+  if (existing) {
+    return existing;
   }
 
   const player = {
@@ -134,14 +150,14 @@ async function savePlayer(env, player) {
 
 
 // ======================================================
-// Passive income
+// PASSIVE INCOME
 // ======================================================
 
 function incomePerSecond(player) {
-  const farm = FARM_BASE * player.farmLevel;
-  const factory = FACTORY_BASE * player.factoryLevel;
-
-  return farm + factory;
+  return (
+    FARM_BASE * player.farmLevel +
+    FACTORY_BASE * player.factoryLevel
+  );
 }
 
 
@@ -157,11 +173,11 @@ function collectPassiveIncome(player) {
     return 0;
   }
 
-  const income = elapsed * incomePerSecond(player);
+  const income =
+    elapsed * incomePerSecond(player);
 
   player.points += income;
   player.totalEarned += income;
-
   player.updatedAt = now;
 
   return income;
@@ -169,39 +185,42 @@ function collectPassiveIncome(player) {
 
 
 // ======================================================
-// Update handler
-// ======================================================
-
-async function handleUpdate(update, env) {
-
-  // Normal message
-  if (update.message) {
-    await handleMessage(update.message, env);
-    return;
-  }
-
-  // Telegram dice / darts result
-  if (update.message?.dice) {
-    await handleDice(update.message, env);
-    return;
-  }
-}
-
-
-// ======================================================
-// Messages
+// MESSAGE HANDLER
 // ======================================================
 
 async function handleMessage(message, env) {
-
   if (!message.from || !message.chat) {
     return;
   }
 
   const userId = message.from.id;
   const chatId = message.chat.id;
-
   const text = (message.text || "").trim();
+
+  /*
+   * /start is handled BEFORE KV.
+   * This guarantees the welcome message does not depend
+   * on the database for the first response.
+   */
+  if (
+    text === "/start" ||
+    text.startsWith("/start@")
+  ) {
+    await sendMessage(
+      env,
+      chatId,
+      `🌱 <b>به Chia Games خوش آمدی!</b>
+
+اینجا مزرعه، کارخانه، بانک، پت، سرقت و رقابت داری.
+
+💰 موجودی اولیه: <b>${format(START_POINTS)}</b> پوینت
+
+برای شروع:
+🎮 /game`
+    );
+
+    return;
+  }
 
   const player = await getPlayer(env, userId);
 
@@ -217,29 +236,8 @@ async function handleMessage(message, env) {
     .toLowerCase()
     .split("@")[0];
 
-  // ------------------------------
-  // START
-  // ------------------------------
 
-  if (command === "/start") {
-    await sendMessage(
-      env,
-      chatId,
-      `🌱 <b>به Chia Games خوش آمدی!</b>
-
-اینجا مزرعه، کارخانه، بانک، پت، سرقت و رقابت داری.
-
-برای شروع:
-🎮 /game`
-    );
-
-    return;
-  }
-
-
-  // ------------------------------
   // GAME
-  // ------------------------------
 
   if (command === "/game") {
     await sendGame(env, chatId, player);
@@ -247,9 +245,7 @@ async function handleMessage(message, env) {
   }
 
 
-  // ------------------------------
   // PROFILE
-  // ------------------------------
 
   if (
     command === "/profile" ||
@@ -261,9 +257,7 @@ async function handleMessage(message, env) {
   }
 
 
-  // ------------------------------
   // BALANCE
-  // ------------------------------
 
   if (
     command === "/balance" ||
@@ -273,21 +267,19 @@ async function handleMessage(message, env) {
     await sendMessage(
       env,
       chatId,
-      `💰 موجودی تو:
+      `💰 <b>موجودی تو</b>
 
 <b>${format(player.points)}</b> پوینت
 
-⚡ درآمد فعلی:
-<b>${format(incomePerSecond(player))}</b> پوینت در ثانیه`
+⚡ درآمد:
+<b>${format(incomePerSecond(player))}</b> پوینت/ثانیه`
     );
 
     return;
   }
 
 
-  // ------------------------------
   // FARM
-  // ------------------------------
 
   if (
     command === "/farm" ||
@@ -298,9 +290,7 @@ async function handleMessage(message, env) {
   }
 
 
-  // ------------------------------
   // FACTORY
-  // ------------------------------
 
   if (
     command === "/factory" ||
@@ -311,9 +301,7 @@ async function handleMessage(message, env) {
   }
 
 
-  // ------------------------------
   // UPGRADE FARM
-  // ------------------------------
 
   if (
     command === "/upgradefarm" ||
@@ -324,9 +312,7 @@ async function handleMessage(message, env) {
   }
 
 
-  // ------------------------------
   // UPGRADE FACTORY
-  // ------------------------------
 
   if (
     command === "/upgradefactory" ||
@@ -337,9 +323,7 @@ async function handleMessage(message, env) {
   }
 
 
-  // ------------------------------
   // PET
-  // ------------------------------
 
   if (
     command === "/pet" ||
@@ -351,9 +335,7 @@ async function handleMessage(message, env) {
   }
 
 
-  // ------------------------------
   // BANK
-  // ------------------------------
 
   if (
     command === "/bank" ||
@@ -364,9 +346,7 @@ async function handleMessage(message, env) {
   }
 
 
-  // ------------------------------
-  // BANK INVEST
-  // ------------------------------
+  // INVEST
 
   if (
     command === "/invest" ||
@@ -379,9 +359,7 @@ async function handleMessage(message, env) {
   }
 
 
-  // ------------------------------
-  // BANK WITHDRAW
-  // ------------------------------
+  // WITHDRAW
 
   if (
     command === "/withdraw" ||
@@ -392,9 +370,7 @@ async function handleMessage(message, env) {
   }
 
 
-  // ------------------------------
   // STEAL
-  // ------------------------------
 
   if (
     command === "/steal" ||
@@ -414,14 +390,12 @@ async function handleMessage(message, env) {
       return;
     }
 
-    await steal(env, chatId, player, target, message);
+    await steal(env, chatId, player, target);
     return;
   }
 
 
-  // ------------------------------
   // TRANSFER
-  // ------------------------------
 
   if (
     command === "/transfer" ||
@@ -436,9 +410,9 @@ async function handleMessage(message, env) {
       await sendMessage(
         env,
         chatId,
-        `💸 برای انتقال، روی پیام بازیکن مقصد Reply بزن:
+        `💸 روی پیام بازیکن مقصد Reply بزن:
 
-<code>/transfer 1000</code>`
+<code>/transfer 100</code>`
       );
 
       return;
@@ -449,9 +423,7 @@ async function handleMessage(message, env) {
   }
 
 
-  // ------------------------------
   // GAMBLE
-  // ------------------------------
 
   if (
     command === "/gamble" ||
@@ -464,9 +436,7 @@ async function handleMessage(message, env) {
   }
 
 
-  // ------------------------------
   // LEADERBOARD
-  // ------------------------------
 
   if (
     command === "/top" ||
@@ -478,9 +448,7 @@ async function handleMessage(message, env) {
   }
 
 
-  // ------------------------------
   // HELP
-  // ------------------------------
 
   if (
     command === "/help" ||
@@ -497,18 +465,25 @@ async function handleMessage(message, env) {
 // ======================================================
 
 async function sendGame(env, chatId, player) {
-
   await sendMessage(
     env,
     chatId,
     `🎮 <b>Chia Games</b>
 
-💰 موجودی: <b>${format(player.points)}</b>
+💰 موجودی:
+<b>${format(player.points)}</b>
 
-🌾 مزرعه: سطح ${player.farmLevel}
-🏭 کارخانه: سطح ${player.factoryLevel}
-🏦 بانک: سطح ${player.bankLevel}
-🐶 پت: هر ۶ ساعت +${PET_REWARD}
+🌾 مزرعه:
+سطح ${player.farmLevel}
+
+🏭 کارخانه:
+سطح ${player.factoryLevel}
+
+🏦 بانک:
+سطح ${player.bankLevel}
+
+🐶 پت:
++${PET_REWARD} هر ۶ ساعت
 
 ⚡ درآمد:
 <b>${format(incomePerSecond(player))}</b> پوینت/ثانیه
@@ -538,7 +513,6 @@ async function sendGame(env, chatId, player) {
 // ======================================================
 
 async function sendProfile(env, chatId, player) {
-
   await sendMessage(
     env,
     chatId,
@@ -577,16 +551,19 @@ ${format(player.totalStolen)}`
 // ======================================================
 
 async function sendFarm(env, chatId, player) {
+  const income =
+    FARM_BASE * player.farmLevel;
 
-  const income = FARM_BASE * player.farmLevel;
-  const cost = FARM_UPGRADE_BASE * player.farmLevel;
+  const cost =
+    FARM_UPGRADE_BASE * player.farmLevel;
 
   await sendMessage(
     env,
     chatId,
     `🌾 <b>مزرعه</b>
 
-سطح فعلی: <b>${player.farmLevel}</b>
+سطح فعلی:
+<b>${player.farmLevel}</b>
 
 درآمد:
 <b>${format(income)}</b> پوینت/ثانیه
@@ -594,15 +571,14 @@ async function sendFarm(env, chatId, player) {
 💵 هزینه ارتقا:
 <b>${format(cost)}</b>
 
-برای ارتقا:
 <code>/upgradefarm</code>`
   );
 }
 
 
 async function upgradeFarm(env, chatId, player) {
-
-  const cost = FARM_UPGRADE_BASE * player.farmLevel;
+  const cost =
+    FARM_UPGRADE_BASE * player.farmLevel;
 
   if (player.points < cost) {
     await sendMessage(
@@ -633,7 +609,7 @@ ${format(player.points)}`
 سطح جدید:
 <b>${player.farmLevel}</b>
 
-درآمد مزرعه:
+درآمد:
 <b>${format(FARM_BASE * player.farmLevel)}</b>/ثانیه`
   );
 }
@@ -644,9 +620,11 @@ ${format(player.points)}`
 // ======================================================
 
 async function sendFactory(env, chatId, player) {
+  const income =
+    FACTORY_BASE * player.factoryLevel;
 
-  const income = FACTORY_BASE * player.factoryLevel;
-  const cost = FACTORY_UPGRADE_BASE * player.factoryLevel;
+  const cost =
+    FACTORY_UPGRADE_BASE * player.factoryLevel;
 
   await sendMessage(
     env,
@@ -662,15 +640,14 @@ async function sendFactory(env, chatId, player) {
 💵 هزینه ارتقا:
 <b>${format(cost)}</b>
 
-برای ارتقا:
 <code>/upgradefactory</code>`
   );
 }
 
 
 async function upgradeFactory(env, chatId, player) {
-
-  const cost = FACTORY_UPGRADE_BASE * player.factoryLevel;
+  const cost =
+    FACTORY_UPGRADE_BASE * player.factoryLevel;
 
   if (player.points < cost) {
     await sendMessage(
@@ -701,7 +678,7 @@ ${format(player.points)}`
 سطح جدید:
 <b>${player.factoryLevel}</b>
 
-درآمد کارخانه:
+درآمد:
 <b>${format(FACTORY_BASE * player.factoryLevel)}</b>/ثانیه`
   );
 }
@@ -712,16 +689,15 @@ ${format(player.points)}`
 // ======================================================
 
 async function claimPet(env, chatId, player) {
-
   const now = Date.now();
 
   if (
     player.petLastClaim &&
     now - player.petLastClaim < PET_COOLDOWN
   ) {
-
     const remaining =
-      PET_COOLDOWN - (now - player.petLastClaim);
+      PET_COOLDOWN -
+      (now - player.petLastClaim);
 
     await sendMessage(
       env,
@@ -759,7 +735,6 @@ async function claimPet(env, chatId, player) {
 // ======================================================
 
 async function sendBank(env, chatId, player) {
-
   const rate =
     BANK_RATES[player.bankLevel] || 0;
 
@@ -777,11 +752,7 @@ async function sendBank(env, chatId, player) {
 سود:
 <b>${rate * 100}%</b>
 
-برای سرمایه‌گذاری:
-
 <code>/invest 1000</code>
-
-برای برداشت:
 
 <code>/withdraw</code>
 
@@ -792,14 +763,14 @@ ${format(BANK_MIN)}`
 
 
 async function invest(env, chatId, player, amount) {
-
-  if (!Number.isFinite(amount) || amount < BANK_MIN) {
+  if (
+    !Number.isFinite(amount) ||
+    amount < BANK_MIN
+  ) {
     await sendMessage(
       env,
       chatId,
-      `❌ مبلغ نامعتبر است.
-
-حداقل سرمایه:
+      `❌ حداقل سرمایه:
 <b>${format(BANK_MIN)}</b>`
     );
 
@@ -852,7 +823,6 @@ async function invest(env, chatId, player, amount) {
 
 
 async function withdrawBank(env, chatId, player) {
-
   if (player.bankAmount <= 0) {
     await sendMessage(
       env,
@@ -862,6 +832,8 @@ async function withdrawBank(env, chatId, player) {
 
     return;
   }
+
+  const principal = player.bankAmount;
 
   const rate =
     BANK_RATES[player.bankLevel] || 0;
@@ -874,10 +846,10 @@ async function withdrawBank(env, chatId, player) {
     );
 
   const profit =
-    Math.floor(player.bankAmount * rate * elapsedDays);
+    Math.floor(principal * rate * elapsedDays);
 
   const total =
-    player.bankAmount + profit;
+    principal + profit;
 
   player.points += total;
   player.totalEarned += profit;
@@ -893,7 +865,7 @@ async function withdrawBank(env, chatId, player) {
     `🏦 <b>برداشت انجام شد.</b>
 
 اصل سرمایه:
-${format(player.bankAmount)}
+${format(principal)}
 
 سود:
 ${format(profit)}
@@ -908,8 +880,13 @@ ${format(profit)}
 // TRANSFER
 // ======================================================
 
-async function transfer(env, chatId, player, target, amount) {
-
+async function transfer(
+  env,
+  chatId,
+  player,
+  target,
+  amount
+) {
   if (
     !Number.isFinite(amount) ||
     amount <= 0
@@ -955,7 +932,7 @@ async function transfer(env, chatId, player, target, amount) {
   await sendMessage(
     env,
     chatId,
-    `💸 انتقال انجام شد.
+    `💸 <b>انتقال انجام شد.</b>
 
 مبلغ:
 <b>${format(amount)}</b>
@@ -973,8 +950,12 @@ async function transfer(env, chatId, player, target, amount) {
 // STEAL
 // ======================================================
 
-async function steal(env, chatId, player, target, message) {
-
+async function steal(
+  env,
+  chatId,
+  player,
+  target
+) {
   const now = Date.now();
 
   if (target.id === player.id) {
@@ -991,7 +972,6 @@ async function steal(env, chatId, player, target, message) {
     player.lastSteal &&
     now - player.lastSteal < STEAL_COOLDOWN
   ) {
-
     const remaining =
       STEAL_COOLDOWN -
       (now - player.lastSteal);
@@ -1034,7 +1014,6 @@ async function steal(env, chatId, player, target, message) {
 
   player.totalStolen += stolen;
   victim.totalLost += stolen;
-
   player.lastSteal = now;
 
   await savePlayer(env, victim);
@@ -1064,8 +1043,12 @@ ${escapeHtml(target.first_name || "بازیکن")}
 // GAMBLE
 // ======================================================
 
-async function gamble(env, chatId, player, amount) {
-
+async function gamble(
+  env,
+  chatId,
+  player,
+  amount
+) {
   if (
     !Number.isFinite(amount) ||
     amount <= 0
@@ -1104,15 +1087,18 @@ async function gamble(env, chatId, player, amount) {
     }
   );
 
-  if (!result.ok) {
+  if (!result.ok || !result.result) {
     player.points += amount;
     await savePlayer(env, player);
 
+    await sendMessage(
+      env,
+      chatId,
+      `❌ خطا در اجرای قمار. پوینتت برگشت داده شد.`
+    );
+
     return;
   }
-
-  // نتیجه دارت در update بعدی پردازش می‌شود.
-  // مبلغ در KV موقت ذخیره می‌شود.
 
   const diceMessage = result.result;
 
@@ -1135,7 +1121,6 @@ async function gamble(env, chatId, player, amount) {
 // ======================================================
 
 async function handleDice(message, env) {
-
   if (!message.dice) {
     return;
   }
@@ -1170,7 +1155,9 @@ async function handleDice(message, env) {
   }
 
   const reward =
-    Math.floor(gamble.amount * multiplier);
+    Math.floor(
+      gamble.amount * multiplier
+    );
 
   if (reward > 0) {
     player.points += reward;
@@ -1180,7 +1167,6 @@ async function handleDice(message, env) {
   await savePlayer(env, player);
 
   if (multiplier === 0) {
-
     await sendMessage(
       env,
       message.chat.id,
@@ -1192,9 +1178,7 @@ ${value}
 💸 از دست رفت:
 ${format(gamble.amount)}`
     );
-
   } else {
-
     await sendMessage(
       env,
       message.chat.id,
@@ -1222,23 +1206,18 @@ ${value}
 // ======================================================
 
 async function leaderboard(env, chatId) {
-
   const list = [];
-
-  const prefix = "player:";
 
   let cursor;
 
   do {
-
     const result =
       await env.CHIA_DB.list({
-        prefix,
+        prefix: "player:",
         cursor
       });
 
     for (const key of result.keys) {
-
       const player =
         await env.CHIA_DB.get(
           key.name,
@@ -1251,9 +1230,10 @@ async function leaderboard(env, chatId) {
       }
     }
 
-    cursor = result.list_complete
-      ? undefined
-      : result.cursor;
+    cursor =
+      result.list_complete
+        ? undefined
+        : result.cursor;
 
   } while (cursor);
 
@@ -1277,7 +1257,6 @@ async function leaderboard(env, chatId) {
     `🏆 <b>جدول برترین‌های Chia</b>\n\n`;
 
   for (let i = 0; i < top.length; i++) {
-
     const player = top[i];
 
     text +=
@@ -1298,7 +1277,6 @@ async function leaderboard(env, chatId) {
 // ======================================================
 
 async function sendHelp(env, chatId) {
-
   await sendMessage(
     env,
     chatId,
@@ -1355,16 +1333,16 @@ async function sendHelp(env, chatId) {
 
 
 // ======================================================
-// Utilities
+// UTILITIES
 // ======================================================
 
 function format(number) {
-  return Number(number || 0).toLocaleString("en-US");
+  return Number(number || 0)
+    .toLocaleString("en-US");
 }
 
 
 function formatTime(ms) {
-
   const totalSeconds =
     Math.ceil(ms / 1000);
 
@@ -1384,7 +1362,6 @@ function formatTime(ms) {
 
 
 function escapeHtml(text) {
-
   return String(text || "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
